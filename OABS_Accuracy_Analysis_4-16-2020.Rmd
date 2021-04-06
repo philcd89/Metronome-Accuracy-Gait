@@ -1,0 +1,965 @@
+---
+title: "OABS Accuracy Analysis"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: spacelab
+    includes:
+      after_body: footer.html
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = getwd())
+```
+
+```{css, echo=FALSE}
+.btn {
+    border-width: 0 0px 0px 0px;
+    font-weight: normal;
+    text-transform: ;
+}
+.btn-default {
+    color: #2ecc71;
+    background-color: #ffffff;
+    border-color: #ffffff;
+}
+```
+
+```{r read in data, warning = FALSE, message=FALSE}
+
+# GET LIBS AND READ IN DATA
+
+library(tidyverse)
+library(patchwork)
+library(plotrix)
+library(summarytools)
+library(DT)
+library(afex)
+library(ez)
+library(emmeans)
+
+AccDat = read.csv('OABS_Accuracy_NewDataset.csv', header = TRUE)
+names(AccDat)[1] = 'idonset'
+AccDat = AccDat %>% filter(!is.na(condtria))
+
+#Coerce all the MacSHAPA timing variables to times
+MacSHAPA_format <- function (MacSHAPA_Col) {
+  #browser()
+  MacSHAPA_split = as.data.frame(MacSHAPA_Col)
+  MacSHAPA_split = separate(MacSHAPA_split, MacSHAPA_Col, into = c("Hours", "Minutes", "Seconds", "Frames"), sep = ":")
+  Cols_to_numConv = c('Hours', 'Minutes', 'Seconds', 'Frames')
+  MacSHAPA_split = lapply(MacSHAPA_split, as.numeric)
+  MacSHAPA_split$Milliseconds = MacSHAPA_split$Frames * 1000/60 # mult by converstion factor of 1000 ms / 60 fps *** Need to adjust fps when Simone provides actual number ***  ***Simone says frame rate 30 on 3-26-20, but it looks to me like 60 fps because the time stamps show the final digit >30....I JUST DON'T KNOW.  60: Final answer.
+  MacSHAPA_split = lapply(MacSHAPA_split, as.character)
+  MacSHAPA_split = as.data.frame(MacSHAPA_split)
+  MacSHAPA_split = MacSHAPA_split %>%
+    mutate_all(as.character) %>%
+    unite(Seconds, Seconds, Milliseconds, sep = ".")
+  #browser()
+  MacSHAPA_fixed = unite(MacSHAPA_split, Time, Hours, Minutes, Seconds, sep = ":")
+  MacSHAPA_fixed$Frames = NULL
+  return(MacSHAPA_fixed)
+}
+
+for (i in grep("idonset", colnames(AccDat)):grep("stepoffset", colnames(AccDat))) {
+  AccDat[,i] = MacSHAPA_format(AccDat[,i])
+}
+
+Cols_to_timeConv = colnames(AccDat[grep("idonset", colnames(AccDat)):grep("stepoffset", colnames(AccDat))])
+AccDat[Cols_to_timeConv] = lapply(AccDat[Cols_to_timeConv], strptime, '%H:%M:%OS')
+AccDat[Cols_to_timeConv] = lapply(AccDat[Cols_to_timeConv], as.POSIXct)
+
+# was working on calculating age....it was already in there as "testage"
+Cols_to_dateConv = colnames(AccDat[grep("tday", colnames(AccDat)):grep("bday", colnames(AccDat))])
+AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.character)
+AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.Date, '%m/%d/%Y')
+
+#isolate SubNum
+AccDat$SubNum = lapply(AccDat$subj, function(subj) {
+  subj = as.character(subj)
+  if (nchar(subj) == 4) {
+    SubNum = substr(subj, 2, 2)
+  } else if (nchar(subj) == 5) {
+    SubNum = substr(subj, 2, 3)
+  }
+})
+AccDat$SubNum = as.character(AccDat$SubNum)
+AccDat = filter(AccDat, SubNum != "k8")
+AccDat$SubNum = as.factor(AccDat$SubNum)
+
+#Create step variable
+AccDat$StepNum = 1
+for (i in 1:nrow(AccDat)) {
+  if (i != 1) {
+    if (AccDat$condtria[i] == AccDat$condtria[i-1]) {
+      AccDat$StepNum[i] = AccDat$StepNum[i-1] + 1
+    } else {
+      AccDat$StepNum[i] = 1
+    }
+  }
+}
+
+# Find instantaneous cadence (i.e., time elapsed between consecutive steps)
+AccDat$IntStepInterval = NA
+for (i in 1:nrow(AccDat)) {
+  if (AccDat$StepNum[i] != 1) {
+    AccDat$IntStepInterval[i] = as.numeric(AccDat$steponset[i] - AccDat$steponset[i-1])
+  }
+}
+
+# Create variable that contains target instantaneous cadence
+AccDat$TargIntStepInterval = lapply(AccDat$cond, function(cond) {
+  if(cond == "b1" | cond == "b2") {
+    TargIntStepInterval = NA
+  } else if (cond == "m100" | cond == "mp100" | cond == "mpb10") {
+    TargIntStepInterval = 0.6
+  } else if (cond == "m125" | cond == "mp125" | cond == "mpb12") {
+    TargIntStepInterval = 0.48
+  } else if (cond == "m75" | cond == "mp75" | cond == "mpb75") {
+    TargIntStepInterval = 0.8
+  } else {
+    TargIntStepInterval = NA
+  }
+})
+AccDat$TargIntStepInterval = as.numeric(AccDat$TargIntStepInterval)
+
+# Compute the difference between the instantaneous cadence and the target instantaneous cadence
+AccDat$IntStepIntervalDev = AccDat$IntStepInterval - AccDat$TargIntStepInterval
+AccDat$Rect_IntStepIntervalDev = abs(AccDat$IntStepIntervalDev)
+
+# Remove trials that are duplicated/recoded per conversation with Simone 4-1-20
+AccDat = AccDat %>%
+  filter(SubNum != 3 | cond != "m100" | !(trial %in% c(4, 10))) %>%
+  filter(SubNum != 3 | cond != "m125" | trial != 10) %>%
+  filter(SubNum != 3 | cond != "m75" | trial != 10) %>%
+  filter(SubNum != 4 | cond != "m100" | trial != 4) %>%
+  filter(SubNum != 7 | cond != "m125" | trial != 10) %>%
+  filter(SubNum != 9 | cond != "m100" | trial != 2) %>%
+  filter(SubNum != 6 | cond != "mp125" | trial != 5) %>%
+  filter(SubNum != 6 | cond != "m100" | trial != 12) %>%
+  filter(SubNum != 17 | cond != "m125" | !(is.na(trial))) %>%
+  filter(SubNum != 7 | cond != "mpb75" | trial != 12) %>%
+  filter(SubNum != 13 | cond != "mpb10" | trial != 12) %>%
+  filter(SubNum != 13 | cond != "mp100" | trial != 10 | StepNum != 8) %>%
+  filter(SubNum != 13 | cond != "mp100" | trial != 10) %>%
+  filter(SubNum != 11 | cond != "b1" | trial != 5)
+  
+
+```
+
+## Project Overview
+
+This code imports, analyzes, and reports results evaluating deviations from metronome cues an experiment assessing stepping accuracy between individuals with obesity and healthy-weight controls during a metronome gait task from the Motor Development Lab (Gill).  These data were collected in 2014.  This code was created in March 2020 By Phil Desrochers.
+
+<br>
+
+***
+
+## Assumptions/Definitions
+
+* Forthcoming....
+
+<br>
+
+***
+
+<!-- ## Variable Glossary -->
+
+<!-- * idonset: Onset time of id variable from MacSHAPA. -->
+<!-- * idoffset: Offset time of id variable from MacSHAPA. -->
+<!-- * latonset: Onset time of latency variable from MacSHAPA. -->
+<!-- * latoffset: Offset time of latency variable from MacSHAPA. -->
+<!-- * behonset: Onset time of behavioral code variable from MacSHAPA. -->
+<!-- * behoffset: Offset time of behavioral code variable from MacSHAPA. -->
+<!-- * relonset: Onset time of reliability code variable from MacSHAPA. -->
+<!-- * reloffset: Offset time of reliability code variable from MacSHAPA. -->
+<!-- * gaitonset: Onset time of gaitdisruptnum variable from MacSHAPA. -->
+<!-- * gaitoffset: Offset time of gaitdisruptnum variable from MacSHAPA. -->
+<!-- * steponset: Onset time of step variable (with gaitmat data) from MacSHAPA. -->
+<!-- * stepoffset: Offset time of step variable (with gaitmat data) from MacSHAPA. -->
+<!-- * subj: Subject number for study SXM3 (e.g. S1M3) for adults and SKXM3 (e.g. SK1M3) for children -->
+<!-- * cora: Child or adult. -->
+<!-- * condord: Condition order - can be A through F. -->
+<!-- * gender: Subject's gender - can be m or f. -->
+<!-- * tday: Test day. -->
+<!-- * bday: Birthday. -->
+<!-- * legr: Measurement of right leg in cm. -->
+<!-- * legl: Measurement of left leg in cm. -->
+<!-- * weight: Measurement of weight in kg. -->
+<!-- * bmi: Body mass index weight/height squared ((kg)/m squared)). -->
+<!-- * ht: Height in cm. -->
+<!-- * injury: Whether subject has had an injury - can by y or n. -->
+<!-- * sports: Whether subject has played sports - can be y or n. -->
+<!-- * sportsinj: Whether subject has sustained sports injuries - can be y or n. -->
+<!-- * whatinj: What subject has injured - letter indicates where injury occurred. -->
+<!-- * legdiscrepancy: Whether subject is aware that they have any leg length discrepancy - y or n. -->
+<!-- * spinalabn: Whether subject has spinal abnormalities/scoliosis - y or n. -->
+<!-- * handedness: Which hand is the subject's dominant hand - r or l. -->
+<!-- * footedness: Which hand is the subject's dominant foot - r or l. -->
+<!-- * expmetro: Whether subject has had experience walking to a metronome beat - y or n. -->
+<!-- * expmusic: Whether subject has had musical or dance experience - y or n. -->
+<!-- * condtria: Condition number + trial number. -->
+<!-- * cond: Condition - b1 (initial baseline). -->
+<!--   * m100 (metronome at 100bpm). -->
+<!--   * mp100 (metronome at 100bpm after 2 minutes of practice). -->
+<!--   * mpb100 (carryover baseline trials after all trials with metronome at 100bpm). -->
+<!--   * m125 (metronome at 125bpm). -->
+<!--   * mp125 (metronome at 125bpm after 2 minutes of practice). -->
+<!--   * mpb125 (carryover baseline trials after all trials with metronome at 125bpm). -->
+<!--   * m75 (metronome at 75bpm). -->
+<!--   * mp75 (metronome at 75bpm after 2 minutes of practice). -->
+<!--   * mpb75 (carryover baseline trials after all trials with metronome at 75bpm). -->
+<!--   * b2 (final baseline). -->
+<!-- * lattrip: Whether subject tripped during latency - y or n. -->
+<!-- * latfall: Whether subject fell during latency - y or n. -->
+<!-- * latstumble: Whether subject stumbled during latency - y or n. -->
+<!-- * latlook: Whether subject looked down during latency - y or n. -->
+<!-- * lattap: Whether subject tapped during latency - y or n. -->
+<!-- * latnod: Whether subject nodded during latency - y or n. -->
+<!-- * latcount: Whether subject counted during latency - y or n. -->
+<!-- * trip: Whether subject tripped during trial - y or n. -->
+<!-- * fall: Whether subject fell during trial - y or n. -->
+<!-- * stumble: Whether subject stumbled during trial - y or n. -->
+<!-- * stop: Whether subject stopped during trial - y or n. -->
+<!-- * crossbackstep: Whether subject cross-stepped or back-stepped during trial - y or n. -->
+<!-- * dblstep: Whether subject double-stepped during trial - y or n. -->
+<!-- * armsout: Whether subject put arms out to the sides during trial - y or n. -->
+<!-- * look: Whether subject looked down during trial - y or n. -->
+<!-- * tap: Whether subject tapped during trial - y or n. -->
+<!-- * nod: Whether subject nodded during trial - y or n. -->
+<!-- * count: Whether subject counted during trial - y or n. -->
+<!-- * tripcount: How many times subject tripped during trial (positive integer). -->
+<!-- * fallcount: How many times subject fell during trial (positive integer). -->
+<!-- * stumblecount: How many times subject stumbled during trial (positive integer). -->
+<!-- * stopcount: How many times subject stopped during trial (positive integer). -->
+<!-- * crosscount: How many times subject cross or back stepped during trial (positive integer). -->
+<!-- * armscount: How many times subject put arms out to the sides during trial (positive integer). -->
+<!-- * lookcount: How many times subject looked down during trial (positive integer). -->
+<!-- * tapcount: How many times subject tapped during trial (positive integer). -->
+<!-- * nodcount: How many times subject nodded during trial (positive integer). -->
+<!-- * countcount: How many times subject counted during trial (positive integer). -->
+<!-- * distance: Distance in cm walked across the gait carpet. -->
+<!-- * velocity: Velocity in cm/s. -->
+<!-- * cadence: Cadence. -->
+<!-- * heelx: X-coordinate of heel. -->
+<!-- * heely: Y-coordinate of heel. -->
+<!-- * toex: X-coordinate of toe. -->
+<!-- * toey: Y-coordinate of toe. -->
+<!-- * firstcontact: First contact time for foot. -->
+<!-- * lastcontact: Last contact time for foot. -->
+<!-- * lrfoot: Left or right foot (0=left; 1=right). -->
+<!-- * stpl: Step length in cm. -->
+<!-- * wid: Step width in cm. -->
+<!-- * stpt: Step time in seconds. -->
+<!-- * swgt: Swing time in seconds. -->
+<!-- * stnt: Stance time in seconds. -->
+<!-- * sst: Single support time in seconds. -->
+<!-- * dst: Double support time in seconds. -->
+
+<!-- <br> -->
+
+<!-- *** -->
+
+## Data Processing Methodology
+
+<br>
+
+### Participant demographics:
+
+Current sample size: n = 15
+
+```{r examine subjet demographics, warning=FALSE, message=FALSE, fig.align="center", fig.width=8, fig.height=5, fig.cap="Figure 1 : Boxplots of Age and BMI, overlayed with individual subject data"}
+
+# Age
+AccDat_Age = AccDat %>%
+  select(SubNum, testagey) %>%
+  group_by(SubNum) %>%
+  summarize(Age = mean(testagey))
+
+Age_boxplot = ggplot(data = AccDat_Age, aes(x = 0, y = Age))+
+  stat_boxplot(geom = "errorbar", colour = "black", size = 1, width = 0.55)+
+  geom_boxplot(fill = '#A3CCAF')+
+  geom_dotplot(binaxis = "y", stackdir = "center")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = 14, color = "black"),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(color = 'black', fill = NA, size = 2),
+        panel.grid = element_line(color = "gray"),
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.position = 'none')+
+  ggtitle('Age')
+
+# BMI
+AccDat_BMI = AccDat %>%
+  select(SubNum, realbmi) %>%
+  group_by(SubNum) %>%
+  summarize(BMI = mean(realbmi))
+
+BMI_boxplot = ggplot(data = AccDat_BMI, aes(x = 0, y = BMI))+
+  stat_boxplot(geom = "errorbar", colour = "black", size = 1, width = 0.55)+
+  geom_boxplot(fill = '#A3CCAF')+
+  geom_dotplot(binaxis = "y", stackdir = "center")+
+  theme_bw()+
+  theme(axis.text.y = element_text(size = 14, color = "black"),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(color = 'black', fill = NA, size = 2),
+        panel.grid = element_line(color = "gray"),
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.position = 'none')+
+  ggtitle('BMI')
+
+Demo_plots = Age_boxplot + BMI_boxplot
+Demo_plots
+
+overweight = count(AccDat_BMI, BMI > 25)
+
+```
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 10px; padding: 10px;}
+</style>
+<div class = "blue">
+
+**NOTE:** 8 out of 15 participants have overweight BMI
+
+</div>
+
+<br>
+
+
+### Inter-Step Interval {.tabset .tabset-fade .tabset-pills}
+
+1) Used steponset to compute inter-step time (I called this instantaneous cadence)
+2) Computed target instantaneous cadence for each metronome tempo
+    * For 75 bpm: (75 bpm / 60 sec)^-1 = 0.8 secs/step
+    * For 100 bpm: (100 bpm / 60 sec)^-1 = 0.6 secs/step
+    * For 125 bpm: (125 bpm / 60 sec)^-1 = 0.48 sec/step
+3) Computed instantaneous deviation by computing difference between instantaneous cadence and target cadence (targ_cadence - inst_cadence)
+4) Computed rectified instantaneous deviation by taking absolute value.
+5) Averaged both rectified and Raw interstep intervals across steps, trials, and participants within each condition.
+
+<br>
+
+<!-- **Next, I looked to see how many steps each person had in each trial of each condition**. -->
+
+<!-- <br> -->
+
+<!-- #### Steps in each trial in each condition {.tabset .tabset-fade .tabset-pills} -->
+
+<!-- ##### Sub 1 -->
+
+<!-- ```{r Sub1 step table} -->
+
+<!-- AccDat_StepsInTrials = AccDat %>% -->
+<!--   select(SubNum, cond, trial, cadence, StepNum, IntStepInterval, IntStepIntervalDev, Rect_IntStepIntervalDev) %>% -->
+<!--   filter(cond %in% c("m75", "m100", "m125", "mp75", "mp100", "mp125", "mpb75", "mpb10", "mpb12"))# %>% -->
+<!--   #filter(trial <= 10) # subject 6 has a trial #12 for condition m100 - my guess is that the condition should be mp100 -->
+<!-- AccDat_StepsInTrials$cond = factor(AccDat_StepsInTrials$cond, levels = c("m75", "m100", "m125", "mp75", "mp100", "mp125", "mpb75", "mpb10", "mpb12")) -->
+
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 1) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+
+<!-- ``` -->
+
+<!-- ##### Sub 3 -->
+
+<!-- ```{r Sub3 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 3) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 4 -->
+
+<!-- ```{r Sub4 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 4) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 5 -->
+
+<!-- ```{r Sub5 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 5) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 6 -->
+
+<!-- ```{r Sub6 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 6) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 7 -->
+
+<!-- ```{r Sub7 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 7) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 8 -->
+
+<!-- ```{r Sub8 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 8) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 9 -->
+
+<!-- ```{r Sub9 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 9) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 10 -->
+
+<!-- ```{r Sub10 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 10) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 11 -->
+
+<!-- ```{r Sub11 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 11) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 13 -->
+
+<!-- ```{r Sub13 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 13) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 16 -->
+
+<!-- ```{r Sub16 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 16) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 17 -->
+
+<!-- ```{r Sub17 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 17) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 22 -->
+
+<!-- ```{r Sub22 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 22) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- ##### Sub 33 -->
+
+<!-- ```{r Sub33 step table} -->
+<!-- subdata = AccDat_StepsInTrials %>% -->
+<!--   filter(SubNum == 33) %>% -->
+<!--   select(trial, cond, StepNum) %>% -->
+<!--   group_by(trial, cond) %>% -->
+<!--   summarise(numSteps = n()) %>% -->
+<!--   spread(cond, numSteps) -->
+<!-- datatable(subdata, rownames = FALSE, filter="top", options = list(pageLength = 12, scrollX=T)) -->
+<!-- ``` -->
+
+<!-- #### -->
+
+<!-- <br> -->
+
+#### Raw ISI
+
+<br>
+
+**Descriptive Statistics**
+
+<br>
+
+```{r Raw ISI Descriptives, warning=FALSE, message = FALSE}
+
+AccDat_StepInt_ANOVAdf = AccDat %>%
+  select(SubNum, cond, trial, realbmi, cadence, StepNum, IntStepInterval, IntStepIntervalDev, Rect_IntStepIntervalDev) %>%
+  filter(cond %in% c("m75", "m100", "m125", "mp75", "mp100", "mp125")) %>%
+  filter(StepNum > 1) # %>%
+  # group_by(cond, SubNum, trial) %>%
+  # summarize_all(funs(mean, std.error), na.rm = TRUE)
+
+AccDat_StepInt_ANOVAdf$cond = factor(AccDat_StepInt_ANOVAdf$cond, levels = c("m75", "m100", "m125", "mp75", "mp100", "mp125"))
+AccDat_StepInt_ANOVAdf$BPM = sapply(AccDat_StepInt_ANOVAdf$cond, function(cond) {
+  if(cond == "m75" | cond == "mp75" | cond == "mpb75") {
+    BPM = 75
+  } else if (cond == "m100" | cond == "mp100" | cond == "mpb10") {
+    BPM = 100
+  } else if (cond == "m125" | cond == "mp125" | cond == "mpb12") {
+    BPM = 125
+  }
+})
+AccDat_StepInt_ANOVAdf$Practice = sapply(AccDat_StepInt_ANOVAdf$cond, function(cond) {
+  if(cond == "m75" | cond == "m100" | cond == "m125") {
+    Practice = "Pre-Practice"
+  } else if (cond == "mp75" | cond == "mp100" | cond == "mp125") {
+    Practice = "Post-Practice"
+  } else
+    Practice = NA
+})
+AccDat_StepInt_ANOVAdf$BPM = factor(AccDat_StepInt_ANOVAdf$BPM)
+AccDat_StepInt_ANOVAdf$Practice = factor(AccDat_StepInt_ANOVAdf$Practice, levels = c("Pre-Practice", "Post-Practice"))
+
+AccDat_StepInt_DESC = ezStats(data = AccDat_StepInt_ANOVAdf,
+                                    wid = SubNum,
+                                    dv = IntStepIntervalDev,  #_mean
+                                    within = c(BPM, Practice))
+AccDat_StepInt_DESC = AccDat_StepInt_DESC %>%
+  mutate(std.error = SD/sqrt(N))
+datatable(AccDat_StepInt_DESC, filter="top", options = list(scrollX=T)) %>%
+  formatRound(columns = c('Mean', 'SD', 'FLSD', 'std.error'), digits = 5)
+```
+
+<br>
+
+**Within-subjects 2 (Practice COndition) x 3 (Pace) rmANOVA**
+
+<br>
+
+```{r raw ISI ANOVA, message=FALSE, warning=FALSE, comment=NA}
+AccDat_StepInt_ANOVA = aov_ez(data = AccDat_StepInt_ANOVAdf,
+                                    id = 'SubNum',
+                                    dv = 'IntStepIntervalDev',  #_mean
+                                    within = c('BPM', 'Practice'))
+nice(AccDat_StepInt_ANOVA)
+```
+
+<br>
+
+**Within subjects contrasts, Tukey corrected**
+
+<br>
+
+Contrasts: Practice at each Pace
+```{r raw ISI emmeans Practice at each BPM, warning=FALSE, message = FALSE, comment = NA}
+AccDat_StepInt_PracByBPM_emmeans = emmeans(AccDat_StepInt_ANOVA, specs = ~ Practice | BPM)
+pairs(AccDat_StepInt_PracByBPM_emmeans)
+```
+
+<br>
+
+Contrasts: Pace
+```{r raw ISI emmeans Pace, warning=FALSE, message = FALSE, comment = NA}
+AccDat_StepInt_BPM_emmeans = emmeans(AccDat_StepInt_ANOVA, specs = ~BPM)
+pairs(AccDat_StepInt_BPM_emmeans)
+```
+
+<br>
+
+**Bar graph of within subjects contrasts**
+
+<br>
+
+```{r raw ISI barplot, warning=FALSE, message = FALSE, fig.align="center", fig.width=8, fig.height=5, fig.cap="Figure 2 : Raw Inter-step Interval plotted for each pace and practice condition"}
+StepInterval_Raw_agg_plot = ggplot(data = AccDat_StepInt_DESC, aes(x = as.factor(BPM), y = Mean, group = Practice, fill = Practice))+
+  geom_bar(stat = 'identity', position = "dodge", color = "black")+
+  geom_errorbar(aes(ymax = Mean + std.error, ymin = Mean - std.error), size = 1, position = position_dodge(width = 0.9), width = 0.3)+
+  labs(fill = "Condition")+
+  theme_bw()+
+  theme(axis.text = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(color = 'black', fill = NA, size = 2),
+        panel.grid = element_line(color = "gray"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14))+
+  ggtitle('Raw Inter-step Interval')
+StepInterval_Raw_agg_plot
+
+```
+
+<br>
+
+#### Rectified ISI
+
+<br>
+
+**Descriptive Statistics**
+
+<br>
+
+```{r Rect ISI Descriptives, warning=FALSE, message = FALSE}
+AccDat_RectStepInt_DESC = ezStats(data = AccDat_StepInt_ANOVAdf,
+                                    wid = SubNum,
+                                    dv = Rect_IntStepIntervalDev,  #_mean
+                                    within = c(BPM, Practice))
+AccDat_RectStepInt_DESC = AccDat_RectStepInt_DESC %>%
+  mutate(std.error = SD/sqrt(N))
+datatable(AccDat_RectStepInt_DESC, filter="top", options = list(scrollX=T)) %>%
+  formatRound(columns = c('Mean', 'SD', 'FLSD', 'std.error'), digits = 5)
+```
+
+<br>
+
+**Within-subjects 2 (Practice COndition) x 3 (Pace) rmANOVA**
+
+<br>
+
+```{r Rect ISI ANOVA, message=FALSE, warning=FALSE, comment=NA}
+AccDat_RectStepInt_ANOVA = aov_ez(data = AccDat_StepInt_ANOVAdf,
+                                    id = 'SubNum',
+                                    dv = 'Rect_IntStepIntervalDev',  #_mean
+                                    within = c('BPM', 'Practice'))
+nice(AccDat_RectStepInt_ANOVA)
+```
+
+<br>
+
+**Within subjects contrasts, Tukey corrected**
+
+<br>
+
+Contrasts: Practice at each Pace
+```{r Rect ISI emmeans Practice at each BPM, warning=FALSE, message = FALSE, comment = NA}
+AccDat_RectStepInt_PracByBPM_emmeans = emmeans(AccDat_RectStepInt_ANOVA, specs = ~ Practice | BPM)
+pairs(AccDat_RectStepInt_PracByBPM_emmeans)
+```
+
+<br>
+
+Contrasts: Pace
+```{r Rect ISI emmeans Pace, warning=FALSE, message = FALSE, comment = NA}
+AccDat_RectStepInt_BPM_emmeans = emmeans(AccDat_RectStepInt_ANOVA, specs = ~BPM)
+pairs(AccDat_RectStepInt_BPM_emmeans)
+```
+
+<br>
+
+**Bar graph of within subjects contrasts**
+
+<br>
+
+```{r Rect ISI barplot, warning=FALSE, message = FALSE, fig.align="center", fig.width=8, fig.height=5, fig.cap="Figure 3 : Rectified Inter-step Interval plotted for each pace and practice condition"}
+StepInterval_Rect_agg_plot = ggplot(data = AccDat_RectStepInt_DESC, aes(x = as.factor(BPM), y = Mean, group = Practice, fill = Practice))+
+  geom_bar(stat = 'identity', position = "dodge", color = "black")+
+  geom_errorbar(aes(ymax = Mean + std.error, ymin = Mean - std.error), size = 1, position = position_dodge(width = 0.9), width = 0.3)+
+  labs(fill = "Condition")+
+  theme_bw()+
+  theme(axis.text = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(color = 'black', fill = NA, size = 2),
+        panel.grid = element_line(color = "gray"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14))+
+  ggtitle('Rectified Inter-step Interval')
+StepInterval_Rect_agg_plot
+
+```
+
+<br>
+
+###
+
+<br><br>
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 10px; padding: 10px;}
+</style>
+<div class = "blue">
+
+**CONCLUSION: When examining Raw step interval, no effects of practice are evident.  However, at the fast pace, participants tend to have a longer ISI relative to the target pace, compared to the 75 bpm condition (but not the 100 bpm condition).  No differences exist in rectified ISI.**
+
+**NOTE: I'm pretty sure is not possible to do a fully within subjects ANCOVA (i.e., repeat these analyses covarying for BMI/age/etc).  To accomplish this, we'd probably need to do a linear mixed effects model.**
+
+</div>
+
+<br>
+
+***
+
+### Cadence
+
+1) I computed the difference between the participant's cadence and target cadence (targ_cadence - cadence)
+2) Examined cadence deviation between each pace and practice condition.
+
+<br>
+
+```{r Cadence Descriptives , warning=FALSE, message = FALSE, fig.align="center", fig.width=8, fig.height=5, fig.cap="Figure 4: Individual Cadence across trials within conditions"}
+
+AccDat_CadenceDev_ANOVAdf = AccDat %>%
+  select(SubNum, cond, trial, cadence, StepNum, IntStepInterval, IntStepIntervalDev, Rect_IntStepIntervalDev) %>%
+  filter(cond %in% c("m75", "m100", "m125", "mp75", "mp100", "mp125")) %>%
+  filter(StepNum <= 6 & StepNum > 1)# %>%
+  # filter(trial <= 10)
+AccDat_CadenceDev_ANOVAdf$CadenceTarg = sapply(AccDat_CadenceDev_ANOVAdf$cond, function(cond) {
+  if(cond == "m75" | cond == "mp75" | cond == "mpb75") {
+    BPM = 75
+  } else if (cond == "m100" | cond == "mp100" | cond == "mpb10") {
+    BPM = 100
+  } else if (cond == "m125" | cond == "mp125" | cond == "mpb12") {
+    BPM = 125
+  }
+})
+AccDat_CadenceDev_ANOVAdf$BPM = sapply(AccDat_CadenceDev_ANOVAdf$cond, function(cond) {
+  if(cond == "m75" | cond == "mp75" | cond == "mpb75") {
+    BPM = 75
+  } else if (cond == "m100" | cond == "mp100" | cond == "mpb10") {
+    BPM = 100
+  } else if (cond == "m125" | cond == "mp125" | cond == "mpb12") {
+    BPM = 125
+  }
+})
+AccDat_CadenceDev_ANOVAdf$Practice = sapply(AccDat_CadenceDev_ANOVAdf$cond, function(cond) {
+  if(cond == "m75" | cond == "m100" | cond == "m125") {
+    Practice = "Pre-Practice"
+  } else if (cond == "mp75" | cond == "mp100" | cond == "mp125") {
+    Practice = "Post-Practice"
+  } else
+    Practice = NA
+})
+AccDat_CadenceDev_ANOVAdf$BPM = factor(AccDat_CadenceDev_ANOVAdf$BPM)
+AccDat_CadenceDev_ANOVAdf$Practice = factor(AccDat_CadenceDev_ANOVAdf$Practice, levels = c("Pre-Practice", "Post-Practice"))
+
+AccDat_CadenceDev_ANOVAdf = AccDat_CadenceDev_ANOVAdf %>%
+  mutate(CadenceDev = CadenceTarg - cadence)
+AccDat_CadenceDev_ANOVAdf$cond = factor(AccDat_CadenceDev_ANOVAdf$cond, levels = c("m75", "m100", "m125", "mp75", "mp100", "mp125", "mpb75", "mpb10", "mpb12"))
+
+AccDat_CadenceDev_DESC = ezStats(data = AccDat_CadenceDev_ANOVAdf,
+                                    wid = SubNum,
+                                    dv = CadenceDev,  #_mean
+                                    within = c(BPM, Practice))
+AccDat_CadenceDev_DESC = AccDat_CadenceDev_DESC %>%
+  mutate(std.error = SD/sqrt(N))
+datatable(AccDat_CadenceDev_DESC, filter="top", options = list(scrollX=T)) %>%
+  formatRound(columns = c('Mean', 'SD', 'FLSD', 'std.error'), digits = 5)
+```
+
+<br>
+
+**Within-subjects 2 (Practice COndition) x 3 (Pace) rmANOVA**
+
+<br>
+
+```{r Cadence ANOVA, message=FALSE, warning=FALSE, comment=NA}
+AccDat_CadenceDev_ANOVA = aov_ez(data = AccDat_CadenceDev_ANOVAdf,
+                                    id = 'SubNum',
+                                    dv = 'CadenceDev',  #_mean
+                                    within = c('BPM', 'Practice'))
+nice(AccDat_CadenceDev_ANOVA)
+```
+
+<br>
+
+**Within subjects contrasts, Tukey corrected**
+
+<br>
+
+Contrasts: Practice at each Pace
+```{r Cadecnce emmeans Practice at each BPM, warning=FALSE, message = FALSE, comment = NA}
+AccDat_CadenceDev_PracByBPM_emmeans = emmeans(AccDat_CadenceDev_ANOVA, specs = ~ Practice | BPM)
+pairs(AccDat_CadenceDev_PracByBPM_emmeans)
+```
+
+<br>
+
+Contrasts: Pace
+```{r Cadence emmeans Pace, warning=FALSE, message = FALSE, comment = NA}
+AccDat_CadenceDev_BPM_emmeans = emmeans(AccDat_CadenceDev_ANOVA, specs = ~BPM)
+pairs(AccDat_CadenceDev_BPM_emmeans)
+```
+
+<br>
+
+**Bar graph of within subjects contrasts**
+
+<br>
+
+```{r Cadence barplot, warning=FALSE, message = FALSE, fig.align="center", fig.width=8, fig.height=5, fig.cap="Figure 2 : Raw Inter-step Interval plotted for each pace and practice condition"}
+CadenceDev_agg_plot = ggplot(data = AccDat_CadenceDev_DESC, aes(x = as.factor(BPM), y = Mean, group = Practice, fill = Practice))+
+  geom_bar(stat = 'identity', position = "dodge", color = "black")+
+  geom_errorbar(aes(ymax = Mean + std.error, ymin = Mean - std.error), size = 1, position = position_dodge(width = 0.9), width = 0.3)+
+  labs(fill = "Condition")+
+  theme_bw()+
+  theme(axis.text = element_text(size = 14, color = "black"),
+        axis.title = element_text(size = 14),
+        panel.border = element_rect(color = 'black', fill = NA, size = 2),
+        panel.grid = element_line(color = "gray"),
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(size = 14),
+        plot.title = element_text(hjust = 0.5, size = 14),
+        legend.text = element_text(size = 14),
+        legend.title = element_text(size = 14))+
+  ggtitle('Raw Inter-step Interval')
+CadenceDev_agg_plot
+
+```
+
+<br>
+
+<br>
+
+<style>
+div.blue { background-color:#e6f0ff; border-radius: 10px; padding: 10px;}
+</style>
+<div class = "blue">
+
+**CONCLUSION: Participants walk at a slower cadence than the target at the 125 BMP time frame**
+
+</div>
+
+<br>
+
+***
+
+## ISI Baseline Comparisons
+
+<br>
+ 
+```{r ISI Baseline Comparison, warning=FALSE, message = FALSE, fig.align="center", fig.width=8, fig.height=5}
+AccDat_BL_ttestdf = AccDat %>%
+  select(SubNum, cond, trial, cadence, StepNum, IntStepInterval, IntStepIntervalDev, Rect_IntStepIntervalDev) %>%
+  filter(cond %in% c("b1", "mpb75", "mpb10", "mpb12")) %>%
+  filter(StepNum > 1) %>%
+  group_by(SubNum, cond, trial) %>%
+  summarize_all(funs(mean(., na.rm = TRUE))) %>%
+  ungroup() %>%
+  group_by(SubNum, cond) %>%
+  summarize_all(funs(mean(., na.rm = TRUE), std.error(., na.rm = TRUE)))
+AccDat_BL_ttestdf$cond = factor(AccDat_BL_ttestdf$cond, levels = c("b1", "mpb75", "mpb10", "mpb12"))
+
+B1_v_MPB75_ISI_ttest = t.test(subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "b1" & AccDat_BL_ttestdf$SubNum != 11), subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "mpb75" & AccDat_BL_ttestdf$SubNum != 11), paired = TRUE)
+B1_v_MPB75_ISI_ttest
+
+B1_v_MPB10_ISI_ttest = t.test(subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "b1"), subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "mpb10"), paired = TRUE)
+B1_v_MPB10_ISI_ttest
+
+B1_v_MPB12_ISI_ttest = t.test(subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "b1" & AccDat_BL_ttestdf$SubNum != 13), subset(AccDat_BL_ttestdf$IntStepInterval_mean, AccDat_BL_ttestdf$cond == "mpb12" & AccDat_BL_ttestdf$SubNum != 13), paired = TRUE)
+B1_v_MPB12_ISI_ttest
+
+ggplot(data = AccDat_BL_ttestdf, aes(x = cond, y = IntStepInterval_mean))+
+  geom_bar(stat = "summary")+
+  geom_errorbar(aes(ymin = IntStepInterval_mean - IntStepInterval_std.error, ymax = IntStepInterval_mean - IntStepInterval_std.error), stat = "summary")
+
+
+B1_v_MPB75_cadence_ttest = t.test(subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "b1" & AccDat_BL_ttestdf$SubNum != 11), subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "mpb75" & AccDat_BL_ttestdf$SubNum != 11), paired = TRUE)
+B1_v_MPB75_cadence_ttest
+
+B1_v_MPB10_cadence_ttest = t.test(subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "b1"), subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "mpb10"), paired = TRUE)
+B1_v_MPB10_cadence_ttest
+
+B1_v_MPB12_cadence_ttest = t.test(subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "b1" & AccDat_BL_ttestdf$SubNum != 13), subset(AccDat_BL_ttestdf$cadence_mean, AccDat_BL_ttestdf$cond == "mpb12" & AccDat_BL_ttestdf$SubNum != 13), paired = TRUE)
+B1_v_MPB12_cadence_ttest
+
+ggplot(data = AccDat_BL_ttestdf, aes(x = cond, y = cadence_mean))+
+  geom_bar(stat = "summary")+
+  geom_errorbar(aes(ymin = cadence_mean - cadence_std.error, ymax = cadence_mean - cadence_std.error), stat = "summary")
+
+```
+
+
+## Baseline ISI and Cadence
+
+```{r}
+
+AccDat_StepInt_BL = AccDat %>%
+  select(SubNum, cond, trial, cadence, StepNum, IntStepInterval) %>%
+  filter(cond %in% c("b1", "b2")) %>%
+  filter(StepNum > 1) %>%
+  select(cond, cadence, IntStepInterval) %>%
+  group_by(cond) %>%
+  summarise_all(list(mean, std.error), na.rm = TRUE)
+
+
+
+```
+
+***
+## Open Questions
+
+<br>
+
+* How to covary BMI?  Do you still think it's beneficial?
+* Isn't Inter-step Interval, aggregated across both steps and trials, just a proxy for cadence?  I.e., aren't they saying the exact same things?
+* To examine the effects of BMI, we'd have to do a mixed model analysis (not an ANOVA), because I don't think you can use a continuous covariate in a fully within-subjects design.
+
+
