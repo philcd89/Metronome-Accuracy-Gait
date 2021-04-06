@@ -43,7 +43,7 @@ library(afex)
 library(ez)
 library(emmeans)
 
-AccDat = read.csv('OABS_Accuracy_NewDataset.csv', header = TRUE)
+AccDat = read.csv('OABS_Accuracy_Data_deID.csv', header = TRUE)
 names(AccDat)[1] = 'idonset'
 AccDat = AccDat %>% filter(!is.na(condtria))
 
@@ -74,10 +74,10 @@ Cols_to_timeConv = colnames(AccDat[grep("idonset", colnames(AccDat)):grep("stepo
 AccDat[Cols_to_timeConv] = lapply(AccDat[Cols_to_timeConv], strptime, '%H:%M:%OS')
 AccDat[Cols_to_timeConv] = lapply(AccDat[Cols_to_timeConv], as.POSIXct)
 
-# was working on calculating age....it was already in there as "testage"
-Cols_to_dateConv = colnames(AccDat[grep("tday", colnames(AccDat)):grep("bday", colnames(AccDat))])
-AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.character)
-AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.Date, '%m/%d/%Y')
+# # was working on calculating age....it was already in there as "testage"
+# Cols_to_dateConv = colnames(AccDat[grep("tday", colnames(AccDat)):grep("bday", colnames(AccDat))])
+# AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.character)
+# AccDat[Cols_to_dateConv] = lapply(AccDat[Cols_to_dateConv], as.Date, '%m/%d/%Y')
 
 #isolate SubNum
 AccDat$SubNum = lapply(AccDat$subj, function(subj) {
